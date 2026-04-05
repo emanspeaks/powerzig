@@ -14,7 +14,7 @@ The [`build-ppc.yml`](.github/workflows/build-ppc.yml) workflow:
 4. Caches the compiled LLVM output so subsequent runs for the same Zig version only rebuild Zig itself (~30 min vs. 2–4 hours).
 5. Publishes a GitHub Release with a `.tar.xz` archive ready to use.
 
-**Target:** `powerpc-linux-musleabi` — fully static musl binary, no glibc version dependency, compatible with any 32-bit big-endian PowerPC including the 750fx (G3). AltiVec is intentionally excluded since the G3 does not support it.
+**Target:** `powerpc-linux-gnu` — dynamically linked against glibc, matching the runtime environment of PowerArch Linux (Arch Linux PPC). AltiVec is intentionally excluded since the G3 does not support it.
 
 ## Schedule
 

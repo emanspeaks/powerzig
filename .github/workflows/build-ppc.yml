@@ -1,8 +1,8 @@
 name: Build Zig for PowerPC 32-bit
 
-# Builds the latest stable Zig release for powerpc-linux-musleabi (iBook G3 / 750fx).
+# Builds the latest stable Zig release for powerpc-linux-gnu (iBook G3 / 750fx).
 # Uses zig-bootstrap to cross-compile LLVM + Zig from source on an x86_64 runner.
-# The resulting static musl binary can run on any 32-bit PowerPC Linux system.
+# The resulting glibc-linked binary is compatible with PowerArch Linux (Arch PPC).
 #
 # First run: 2–4 hours (LLVM compilation).
 # Subsequent runs with the same Zig version: ~30 min (LLVM result is cached).
@@ -68,7 +68,7 @@ print(keys[0])
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Cross-compile LLVM + Zig for powerpc-linux-musleabi using zig-bootstrap.
+  # Cross-compile LLVM + Zig for powerpc-linux-gnu using zig-bootstrap.
   # ─────────────────────────────────────────────────────────────────────────────
   build:
     needs: check
@@ -78,8 +78,8 @@ print(keys[0])
 
     env:
       ZIG_VERSION: ${{ needs.check.outputs.zig_version }}
-      # Target triple: 32-bit big-endian PowerPC, musl libc (statically linked).
-      ZIG_TARGET:  powerpc-linux-musleabi
+      # Target triple: 32-bit big-endian PowerPC, glibc (matches PowerArch Linux).
+      ZIG_TARGET:  powerpc-linux-gnu
       # CPU baseline is safe for any 32-bit PPC including the 750fx (G3).
       # The 750fx has no AltiVec, so we must not use a cpu that enables it.
       ZIG_CPU:     baseline
@@ -199,7 +199,7 @@ To make the PATH change permanent, add the \`export\` line to your \`~/.bashrc\`
 | Zig version | \`${ZIG_VERSION}\` |
 | Target triple | \`${ZIG_TARGET}\` |
 | CPU | \`${ZIG_CPU}\` (safe for 750fx — no AltiVec) |
-| libc | musl (fully static binary) |
+| libc | glibc (dynamically linked, matches PowerArch Linux) |
 | Built with | [zig-bootstrap](https://github.com/ziglang/zig-bootstrap) on GitHub Actions |
 | Runner | ubuntu-latest (x86_64) |" \
             "${{ env.ARCHIVE }}"
