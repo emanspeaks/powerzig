@@ -139,7 +139,7 @@ jobs:
 
     steps:
       # Free runners ship with a lot of pre-installed toolchains we don't need.
-      # Reclaiming ~15 GB prevents out-of-disk failures during the LLVM build.
+      # Reclaim as much disk as possible before the multi-GB LLVM build.
       - name: Free up runner disk space
         run: |
           sudo rm -rf \
@@ -148,7 +148,13 @@ jobs:
             /usr/local/.ghcup \
             /opt/ghc \
             /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/boost
+            /usr/local/share/boost \
+            /usr/share/swift \
+            /usr/local/julia* \
+            /usr/lib/jvm \
+            /usr/share/miniconda
+          sudo docker image prune --all --force 2>/dev/null || true
+          sudo apt-get clean -y
           sudo apt-get autoremove -y -qq
           df -h
 
@@ -181,19 +187,33 @@ jobs:
           key: zig-${{ env.ZIG_VERSION }}-${{ env.ZIG_TARGET }}-${{ env.ZIG_CPU }}-v1
 
       # zig-bootstrap runs two full LLVM compilations (host + cross-target).
-      # Each intermediate build dir grows to ~10 GB but is never cleaned up,
-      # exhausting the runner's ~14 GB of usable disk mid-build.  Patch the
-      # build script to delete each build dir immediately after its install.
+      # Patches applied here address two failure modes:
+      #
+      # 1. DISK: each intermediate cmake build dir grows to ~10 GB but is never
+      #    cleaned up.  Insert rm -rf after each cmake install to free space.
+      #    Also delete LLVM/zlib/zstd source trees once the cross-build is done.
+      #
+      # 2. OOM / DISK: host LLVM/Zig are build-time tools only; we don't care
+      #    about their runtime speed.  MinSizeRel (-Os) reduces per-compile-job
+      #    RAM and .o file sizes by ~30-50% vs Release (-O2/-O3).  Two sed passes
+      #    change exactly the first two CMAKE_BUILD_TYPE=Release occurrences
+      #    (host LLVM cmake, host Zig cmake) leaving cross-LLVM as Release.
       - name: Patch zig-bootstrap to free disk between build stages
         if: steps.cache-zig.outputs.cache-hit != 'true'
         run: |
+          # --- build dir cleanup after each cmake install ---
           sed -i '/# Now we build Zig, still with system/i rm -rf "$ROOTDIR/out/build-llvm-host"' bootstrap/build
           sed -i '/# Now we have Zig as a cross compiler/i rm -rf "$ROOTDIR/out/build-zig-host"' bootstrap/build
           sed -i '/# Finally, we can cross compile Zig itself/i rm -rf "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"' bootstrap/build
+          # --- delete source trees once cross-LLVM no longer needs them ---
+          sed -i '/# Finally, we can cross compile Zig itself/i rm -rf "$ROOTDIR/llvm" "$ROOTDIR/zlib" "$ROOTDIR/zstd"' bootstrap/build
+          # --- MinSizeRel for host builds (first two CMAKE_BUILD_TYPE=Release) ---
+          sed -i '0,/-DCMAKE_BUILD_TYPE=Release/{s/-DCMAKE_BUILD_TYPE=Release/-DCMAKE_BUILD_TYPE=MinSizeRel/}' bootstrap/build
+          sed -i '0,/-DCMAKE_BUILD_TYPE=Release/{s/-DCMAKE_BUILD_TYPE=Release/-DCMAKE_BUILD_TYPE=MinSizeRel/}' bootstrap/build
           echo "=== Disk before build ==="
           df -h
-          echo "=== Patched cleanup lines ==="
-          grep -n 'rm -rf' bootstrap/build
+          echo "=== Verified patch insertions ==="
+          grep -n 'rm -rf\|CMAKE_BUILD_TYPE' bootstrap/build
 
       - name: Build LLVM + Zig for PowerPC 32-bit
         if: steps.cache-zig.outputs.cache-hit != 'true'
