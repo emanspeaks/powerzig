@@ -1,6 +1,7 @@
 name: Build Zig for PowerPC 32-bit
 
-# Builds Zig for powerpc-linux-gnu (iBook G3 / 750fx) using zig-bootstrap from Codeberg.
+# Builds Zig for powerpc-linux-musl (iBook G3 / 750fx) using zig-bootstrap from Codeberg.
+# Static musl binary: no runtime dependencies, strict IEEE 754, portable across distros.
 #
 # Trigger behaviour:
 #   push to any branch  → full build, no release (smoke-tests the workflow)
@@ -125,8 +126,10 @@ jobs:
 
     env:
       ZIG_VERSION: ${{ needs.prepare.outputs.zig_version }}
-      # Target triple: 32-bit big-endian PowerPC, glibc (matches PowerArch Linux).
-      ZIG_TARGET:  powerpc-linux-gnu
+      # Target triple: 32-bit big-endian PowerPC, musl libc (statically linked).
+      # powerpc-linux-musl (no 'eabi' suffix) uses the standard ELF/SVR4 ABI with
+      # hardware float — correct for the 750fx which has a real FPU.
+      ZIG_TARGET:  powerpc-linux-musl
       # CPU baseline is safe for any 32-bit PPC including the 750fx (G3).
       # The 750fx has no AltiVec, so we must not use a cpu that enables it.
       ZIG_CPU:     baseline
@@ -250,7 +253,7 @@ jobs:
           echo "| Zig version | \`${ZIG_VERSION}\` |"                                                             >> "$NOTE"
           echo "| Target triple | \`${ZIG_TARGET}\` |"                                                            >> "$NOTE"
           echo "| CPU | \`${ZIG_CPU}\` (safe for 750fx — no AltiVec) |"                                          >> "$NOTE"
-          echo "| libc | glibc (dynamically linked, matches PowerArch Linux) |"                                    >> "$NOTE"
+          echo "| libc | musl (statically linked — no runtime dependencies) |"                                     >> "$NOTE"
           echo "| Built with | [zig-bootstrap](https://codeberg.org/ziglang/zig-bootstrap) on GitHub Actions |"   >> "$NOTE"
           echo "| Runner | ubuntu-latest (x86_64) |"                                                               >> "$NOTE"
 
