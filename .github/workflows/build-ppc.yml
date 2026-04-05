@@ -170,25 +170,40 @@ jobs:
           fi
           echo "Cloned at commit: $(git -C bootstrap rev-parse --short HEAD)"
 
-      # Cache the compiled LLVM output across workflow runs.
-      # On a cache hit the build script skips the multi-hour LLVM compilation.
-      - name: Restore cached LLVM output
-        id: cache-llvm
+      # Cache only the final Zig install (~150 MB), not the multi-GB build dirs.
+      # A cache hit skips the entire 5-hour build.  Key includes version+target+cpu
+      # so any upstream change busts the cache and triggers a fresh build.
+      - name: Restore cached Zig binary
+        id: cache-zig
         uses: actions/cache@v4
         with:
-          path: bootstrap/out
-          key: llvm-${{ env.ZIG_VERSION }}-${{ env.ZIG_TARGET }}-${{ env.ZIG_CPU }}-v3
+          path: bootstrap/out/zig-${{ env.ZIG_TARGET }}-${{ env.ZIG_CPU }}
+          key: zig-${{ env.ZIG_VERSION }}-${{ env.ZIG_TARGET }}-${{ env.ZIG_CPU }}-v1
+
+      # zig-bootstrap runs two full LLVM compilations (host + cross-target).
+      # Each intermediate build dir grows to ~10 GB but is never cleaned up,
+      # exhausting the runner's ~14 GB of usable disk mid-build.  Patch the
+      # build script to delete each build dir immediately after its install.
+      - name: Patch zig-bootstrap to free disk between build stages
+        if: steps.cache-zig.outputs.cache-hit != 'true'
+        run: |
+          sed -i '/# Now we build Zig, still with system/i rm -rf "$ROOTDIR/out/build-llvm-host"' bootstrap/build
+          sed -i '/# Now we have Zig as a cross compiler/i rm -rf "$ROOTDIR/out/build-zig-host"' bootstrap/build
+          sed -i '/# Finally, we can cross compile Zig itself/i rm -rf "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"' bootstrap/build
+          echo "=== Disk before build ==="
+          df -h
+          echo "=== Patched cleanup lines ==="
+          grep -n 'rm -rf' bootstrap/build
 
       - name: Build LLVM + Zig for PowerPC 32-bit
+        if: steps.cache-zig.outputs.cache-hit != 'true'
         run: |
-          cd bootstrap
           echo "=== Building Zig $ZIG_VERSION for $ZIG_TARGET (cpu=$ZIG_CPU) ==="
-          if [[ "${{ steps.cache-llvm.outputs.cache-hit }}" == "true" ]]; then
-            echo "LLVM cache hit — skipping LLVM compilation."
-          else
-            echo "No LLVM cache — this will take 2–4 hours."
-          fi
+          echo "First run: ~5 hours (two LLVM compilations + Zig).  Cached after success."
+          cd bootstrap
           ./build "$ZIG_TARGET" "$ZIG_CPU"
+          echo "=== Disk after build ==="
+          df -h
 
       - name: Verify build output
         run: |
