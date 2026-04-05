@@ -1,13 +1,21 @@
 name: Build Zig for PowerPC 32-bit
 
-# Builds the latest Zig from the zig-bootstrap main branch on Codeberg.
-# zig-bootstrap handles fetching the Zig source and LLVM internally.
-# The resulting glibc-linked binary targets powerpc-linux-gnu (iBook G3 / 750fx).
+# Builds Zig for powerpc-linux-gnu (iBook G3 / 750fx) using zig-bootstrap from Codeberg.
+#
+# Trigger behaviour:
+#   push to any branch  → full build, no release (smoke-tests the workflow)
+#   push of tag v*.*.*  → full build + GitHub Release (zig-bootstrap checked out at
+#                         the matching version tag; v0.14.0 → zig-bootstrap 0.14.0)
+#   schedule (weekly)   → full build + release, skipped if this version was released before
+#   workflow_dispatch   → full build + release (force_rebuild overwrites an existing release)
 #
 # First run: 2–4 hours (LLVM compilation).
-# Subsequent runs where the Zig version hasn't changed: ~30 min (LLVM cached).
+# Repeat runs where ZIG_VERSION is unchanged: ~30 min (LLVM output is cached).
 
 on:
+  push:
+    branches: ['**']
+    tags: ['v[0-9]*']
   schedule:
     - cron: '0 2 * * 0'   # Every Sunday at 02:00 UTC
   workflow_dispatch:
@@ -25,50 +33,85 @@ permissions:
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   # Clone zig-bootstrap, detect the Zig version it will build, and decide
-  # whether a release for that version already exists.
+  # whether to build and/or publish a release.
   # ─────────────────────────────────────────────────────────────────────────────
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      zig_version:  ${{ steps.version.outputs.zig_version }}
-      should_build: ${{ steps.gate.outputs.should_build }}
+      zig_version:   ${{ steps.version.outputs.zig_version }}
+      should_build:  ${{ steps.gate.outputs.should_build }}
+      should_release: ${{ steps.gate.outputs.should_release }}
     steps:
-      - name: Clone zig-bootstrap (main) from Codeberg
+      # For version-tag pushes (e.g. v0.14.0) check out zig-bootstrap at the
+      # matching tag (0.14.0) so the build is pinned to that exact Zig release.
+      # For all other triggers, use the main branch (latest commits).
+      - name: Clone zig-bootstrap from Codeberg
         run: |
-          git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git bootstrap
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            BOOTSTRAP_REF="${{ github.ref_name }}"
+            BOOTSTRAP_REF="${BOOTSTRAP_REF#v}"   # strip leading 'v': v0.14.0 → 0.14.0
+            echo "Tag push — cloning zig-bootstrap at $BOOTSTRAP_REF"
+            git clone --depth 1 --branch "$BOOTSTRAP_REF" \
+              https://codeberg.org/ziglang/zig-bootstrap.git bootstrap 2>/dev/null || {
+              echo "Tag $BOOTSTRAP_REF not found in zig-bootstrap; falling back to main"
+              git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git bootstrap
+            }
+          else
+            echo "Non-tag push — cloning zig-bootstrap main (latest commits)"
+            git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git bootstrap
+          fi
           echo "Cloned at commit: $(git -C bootstrap rev-parse --short HEAD)"
 
       - name: Detect Zig version from zig-bootstrap source
         id: version
         run: |
           cd bootstrap
-          # zig-bootstrap stores the target Zig version in a file or the build script.
           if [[ -f zig-version ]]; then
             V=$(tr -d '[:space:]' < zig-version)
           elif grep -q 'ZIG_VERSION' build 2>/dev/null; then
             V=$(grep -m1 'ZIG_VERSION' build | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^"'\''[:space:]]*')
           else
-            # Fallback: date + short hash so the release tag is still unique.
+            # Fallback: date + short hash keeps release tags unique.
             V="nightly-$(git log -1 --format='%cd' --date=format:'%Y%m%d')-$(git rev-parse --short HEAD)"
           fi
           echo "zig_version=$V" >> "$GITHUB_OUTPUT"
           echo "Detected Zig version: $V"
 
-      - name: Check for an existing release
+      - name: Determine build and release gates
         id: gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          EVENT="${{ github.event_name }}"
+          REF_TYPE="${{ github.ref_type }}"
+          FORCE="${{ inputs.force_rebuild }}"
           TAG="zig-${{ steps.version.outputs.zig_version }}-powerpc32"
-          if [[ "${{ inputs.force_rebuild }}" == "true" ]]; then
+
+          if [[ "$EVENT" == "push" ]]; then
+            # Always build on push (verifies the workflow); never release on branch push.
             echo "should_build=true" >> "$GITHUB_OUTPUT"
-            echo "Force-rebuild requested — will build regardless."
-          elif gh release view "$TAG" --repo "${{ github.repository }}" &>/dev/null; then
-            echo "should_build=false" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG already exists — skipping build."
+            if [[ "$REF_TYPE" == "tag" ]]; then
+              echo "should_release=true"  >> "$GITHUB_OUTPUT"
+              echo "Tag push — will build and release as $TAG"
+            else
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              echo "Branch push — will build but not release"
+            fi
           else
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
-            echo "No release found for $TAG — will build."
+            # Schedule or workflow_dispatch: skip if this version is already released.
+            if [[ "$FORCE" == "true" ]]; then
+              echo "should_build=true"   >> "$GITHUB_OUTPUT"
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "Force-rebuild — will build and release regardless"
+            elif gh release view "$TAG" --repo "${{ github.repository }}" &>/dev/null; then
+              echo "should_build=false"   >> "$GITHUB_OUTPUT"
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              echo "Release $TAG already exists — skipping"
+            else
+              echo "should_build=true"   >> "$GITHUB_OUTPUT"
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "No existing release for $TAG — will build and release"
+            fi
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -107,9 +150,18 @@ jobs:
         run: |
           sudo apt-get install -y -qq cmake ninja-build xz-utils python3
 
-      - name: Clone zig-bootstrap (main) from Codeberg
+      # Clone zig-bootstrap using the same logic as the prepare job.
+      - name: Clone zig-bootstrap from Codeberg
         run: |
-          git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git bootstrap
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            BOOTSTRAP_REF="${{ github.ref_name }}"
+            BOOTSTRAP_REF="${BOOTSTRAP_REF#v}"
+            git clone --depth 1 --branch "$BOOTSTRAP_REF" \
+              https://codeberg.org/ziglang/zig-bootstrap.git bootstrap 2>/dev/null || \
+            git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git bootstrap
+          else
+            git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git bootstrap
+          fi
           echo "Cloned at commit: $(git -C bootstrap rev-parse --short HEAD)"
 
       # Cache the compiled LLVM output across workflow runs.
@@ -157,8 +209,7 @@ jobs:
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
           ls -lah "$ARCHIVE"
 
-      # --cleanup-tag removes both the release and its git tag in one call;
-      # no local checkout or git credentials required.
+      # --cleanup-tag removes both the release and its git tag in one call.
       - name: Delete existing release (force-rebuild only)
         if: inputs.force_rebuild == 'true'
         env:
@@ -172,6 +223,7 @@ jobs:
 
       # Write release notes line-by-line to avoid heredoc/YAML indentation conflicts.
       - name: Write release notes
+        if: needs.prepare.outputs.should_release == 'true'
         run: |
           TAG="zig-${ZIG_VERSION}-powerpc32"
           REPO="${{ github.repository }}"
@@ -203,6 +255,7 @@ jobs:
           echo "| Runner | ubuntu-latest (x86_64) |"                                                               >> "$NOTE"
 
       - name: Publish GitHub Release
+        if: needs.prepare.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
