@@ -1,0 +1,205 @@
+name: Build Zig for PowerPC 32-bit
+
+# Builds the latest stable Zig release for powerpc-linux-musleabi (iBook G3 / 750fx).
+# Uses zig-bootstrap to cross-compile LLVM + Zig from source on an x86_64 runner.
+# The resulting static musl binary can run on any 32-bit PowerPC Linux system.
+#
+# First run: 2–4 hours (LLVM compilation).
+# Subsequent runs with the same Zig version: ~30 min (LLVM result is cached).
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'   # Every Sunday at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      zig_version:
+        description: 'Zig version tag to build (e.g. 0.13.0). Leave empty for latest stable.'
+        required: false
+        default: ''
+      force_rebuild:
+        description: 'Rebuild and overwrite even if a release already exists'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Resolve the Zig version and decide whether we actually need to build.
+  # ─────────────────────────────────────────────────────────────────────────────
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      zig_version:  ${{ steps.resolve.outputs.zig_version }}
+      should_build: ${{ steps.gate.outputs.should_build }}
+    steps:
+      - name: Resolve Zig version
+        id: resolve
+        run: |
+          if [[ -n "${{ inputs.zig_version }}" ]]; then
+            ZIG_VERSION="${{ inputs.zig_version }}"
+          else
+            # Fetch the download index; first non-"master" key is the latest stable release.
+            ZIG_VERSION=$(curl -fsSL https://ziglang.org/download/index.json | \
+              python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+keys = [k for k in d if k != 'master']
+print(keys[0])
+")
+          fi
+          echo "zig_version=$ZIG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved Zig version: $ZIG_VERSION"
+
+      - name: Check for an existing release
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="zig-${{ steps.resolve.outputs.zig_version }}-powerpc32"
+          if [[ "${{ inputs.force_rebuild }}" == "true" ]]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "Force-rebuild requested — will build regardless."
+          elif gh release view "$TAG" --repo "${{ github.repository }}" &>/dev/null; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists — skipping build."
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "No release found for $TAG — will build."
+          fi
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Cross-compile LLVM + Zig for powerpc-linux-musleabi using zig-bootstrap.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # 6-hour hard cap (LLVM build can be long)
+
+    env:
+      ZIG_VERSION: ${{ needs.check.outputs.zig_version }}
+      # Target triple: 32-bit big-endian PowerPC, musl libc (statically linked).
+      ZIG_TARGET:  powerpc-linux-musleabi
+      # CPU baseline is safe for any 32-bit PPC including the 750fx (G3).
+      # The 750fx has no AltiVec, so we must not use a cpu that enables it.
+      ZIG_CPU:     baseline
+
+    steps:
+      # Free runners ship with a lot of pre-installed toolchains we don't need.
+      # Reclaiming ~15 GB prevents out-of-disk failures during the LLVM build.
+      - name: Free up runner disk space
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /usr/local/.ghcup \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost
+          sudo apt-get autoremove -y -qq
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get install -y -qq cmake ninja-build xz-utils python3
+
+      - name: Clone zig-bootstrap at Zig version tag
+        run: |
+          git clone --depth 1 --branch "$ZIG_VERSION" \
+            https://github.com/ziglang/zig-bootstrap.git bootstrap
+          echo "Cloned zig-bootstrap at tag $ZIG_VERSION"
+          git -C bootstrap log --oneline -1
+
+      # Cache the compiled LLVM output across workflow runs.
+      # On a cache hit the build script detects the existing output and skips
+      # the multi-hour LLVM compilation, going straight to building Zig itself.
+      - name: Restore cached LLVM output
+        id: cache-llvm
+        uses: actions/cache@v4
+        with:
+          path: bootstrap/out
+          key: llvm-${{ env.ZIG_VERSION }}-${{ env.ZIG_TARGET }}-${{ env.ZIG_CPU }}-v1
+
+      - name: Build LLVM + Zig for PowerPC 32-bit
+        run: |
+          cd bootstrap
+          echo "=== Building Zig $ZIG_VERSION for $ZIG_TARGET (cpu=$ZIG_CPU) ==="
+          if [[ "${{ steps.cache-llvm.outputs.cache-hit }}" == "true" ]]; then
+            echo "LLVM cache hit — skipping LLVM compilation."
+          else
+            echo "No LLVM cache — this will take 2–4 hours."
+          fi
+          ./build "$ZIG_TARGET" "$ZIG_CPU"
+
+      - name: Verify build output
+        run: |
+          OUT_DIR="bootstrap/out/zig-$ZIG_TARGET-$ZIG_CPU"
+          if [[ ! -f "$OUT_DIR/bin/zig" ]]; then
+            echo "ERROR: expected zig binary not found at $OUT_DIR/bin/zig"
+            echo "Contents of bootstrap/out:"
+            find bootstrap/out -maxdepth 3 | sort
+            exit 1
+          fi
+          echo "Build successful!"
+          file "$OUT_DIR/bin/zig"
+          ls -lah "$OUT_DIR/bin/zig"
+
+      - name: Package release archive
+        run: |
+          SRC="bootstrap/out/zig-$ZIG_TARGET-$ZIG_CPU"
+          DEST="zig-$ZIG_VERSION-powerpc"
+          ARCHIVE="zig-linux-powerpc-$ZIG_VERSION.tar.xz"
+
+          cp -r "$SRC" "$DEST"
+          tar cJf "$ARCHIVE" "$DEST/"
+
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          echo "DEST=$DEST"       >> "$GITHUB_ENV"
+          ls -lah "$ARCHIVE"
+
+      # If force_rebuild was requested, delete the old release + tag so we can
+      # recreate it cleanly.  Failures here are non-fatal (release may not exist).
+      - name: Delete existing release (force-rebuild only)
+        if: inputs.force_rebuild == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="zig-${ZIG_VERSION}-powerpc32"
+          gh release delete "$TAG" --repo "${{ github.repository }}" --yes 2>/dev/null || true
+          git push origin --delete "$TAG" 2>/dev/null || true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="zig-${ZIG_VERSION}-powerpc32"
+
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "Zig ${ZIG_VERSION} — PowerPC 32-bit (iBook G3)" \
+            --notes "## Zig ${ZIG_VERSION} for PowerPC 32-bit
+
+Cross-compiled Zig targeting \`${ZIG_TARGET}\`, for the iBook G3 Snow Clamshell (750fx CPU) running PowerArch Linux.
+
+### Download and install on iBook G3
+
+\`\`\`bash
+wget https://github.com/${{ github.repository }}/releases/download/${TAG}/zig-linux-powerpc-${ZIG_VERSION}.tar.xz
+tar xf zig-linux-powerpc-${ZIG_VERSION}.tar.xz
+export PATH=\"\$PWD/zig-${ZIG_VERSION}-powerpc/bin:\$PATH\"
+zig version
+\`\`\`
+
+To make the PATH change permanent, add the \`export\` line to your \`~/.bashrc\` or \`~/.profile\`.
+
+### Build details
+
+| Field | Value |
+|---|---|
+| Zig version | \`${ZIG_VERSION}\` |
+| Target triple | \`${ZIG_TARGET}\` |
+| CPU | \`${ZIG_CPU}\` (safe for 750fx — no AltiVec) |
+| libc | musl (fully static binary) |
+| Built with | [zig-bootstrap](https://github.com/ziglang/zig-bootstrap) on GitHub Actions |
+| Runner | ubuntu-latest (x86_64) |" \
+            "${{ env.ARCHIVE }}"
