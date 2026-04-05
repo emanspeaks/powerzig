@@ -174,7 +174,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bootstrap/out
-          key: llvm-${{ env.ZIG_VERSION }}-${{ env.ZIG_TARGET }}-${{ env.ZIG_CPU }}-v1
+          key: llvm-${{ env.ZIG_VERSION }}-${{ env.ZIG_TARGET }}-${{ env.ZIG_CPU }}-v2
 
       - name: Build LLVM + Zig for PowerPC 32-bit
         run: |
