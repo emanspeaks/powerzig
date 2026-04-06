@@ -5,15 +5,17 @@ name: Build Zig for PowerPC 32-bit
 # NOT for bare powerpc-linux-gnu or powerpc-linux-musl (ABI suffix required).
 # The 750fx has a hardware FPU so the 'hf' suffix is correct.
 #
+# LLVM is NOT built here.  Pre-built LLVM artifacts are downloaded from the
+# emanspeaks/powerzig-bootstrap repo at the tag pinned by LLVM_ARTIFACT_TAG below.
+# When powerzig-bootstrap publishes a new LLVM release (v2, v3, …), update
+# LLVM_ARTIFACT_TAG here and push — the version bump drives a fresh Zig build.
+#
 # Trigger behaviour:
 #   push to any branch  → full build, no release (smoke-tests the workflow)
 #   push of tag v*.*.*  → full build + GitHub Release (zig-bootstrap checked out at
 #                         the matching version tag; v0.14.0 → zig-bootstrap 0.14.0)
 #   schedule (weekly)   → full build + release, skipped if this version was released before
 #   workflow_dispatch   → full build + release (force_rebuild overwrites an existing release)
-#
-# First run: 2–4 hours (LLVM compilation).
-# Repeat runs where ZIG_VERSION is unchanged: ~30 min (LLVM output is cached).
 
 on:
   push:
@@ -33,6 +35,20 @@ on:
 permissions:
   contents: write
 
+env:
+  # ── LLVM artifact pin ──────────────────────────────────────────────────────
+  # Release tag in emanspeaks/powerzig-bootstrap that provides the pre-built
+  # LLVM artifacts used by this build.  Bump this when powerzig-bootstrap
+  # publishes a new LLVM release; the version bump here triggers a Zig rebuild.
+  LLVM_ARTIFACT_TAG:  v1
+  LLVM_ARTIFACT_REPO: emanspeaks/powerzig-bootstrap
+  # ── Cross-compilation target ───────────────────────────────────────────────
+  # 32-bit big-endian PowerPC, musl, hard-float ABI.
+  ZIG_TARGET: powerpc-linux-musleabihf
+  # CPU baseline is safe for any 32-bit PPC including the 750fx (G3).
+  # The 750fx has no AltiVec, so we must not use a cpu that enables it.
+  ZIG_CPU:    baseline
+
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   # Clone zig-bootstrap, detect the Zig version it will build, and decide
@@ -41,8 +57,8 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      zig_version:   ${{ steps.version.outputs.zig_version }}
-      should_build:  ${{ steps.gate.outputs.should_build }}
+      zig_version:    ${{ steps.version.outputs.zig_version }}
+      should_build:   ${{ steps.gate.outputs.should_build }}
       should_release: ${{ steps.gate.outputs.should_release }}
     steps:
       # For version-tag pushes (e.g. v0.14.0) check out zig-bootstrap at the
@@ -118,114 +134,101 @@ jobs:
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Cross-compile LLVM + Zig for powerpc-linux-gnu using zig-bootstrap.
+  # Download pre-built LLVM from emanspeaks/powerzig-bootstrap and compile
+  # only the Zig stage (~30 min instead of the 5-hour full build).
   # ─────────────────────────────────────────────────────────────────────────────
   build:
     needs: prepare
     if: needs.prepare.outputs.should_build == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # 6-hour hard cap (LLVM build can be long)
+    timeout-minutes: 120   # 2-hour cap; Zig-only build is much faster than LLVM+Zig
 
     env:
       ZIG_VERSION: ${{ needs.prepare.outputs.zig_version }}
-      # Target triple: 32-bit big-endian PowerPC, musl, hard-float ABI.
-      # Zig can provide libc for musleabihf (and musleabi / gnueabi / gnueabihf) but
-      # NOT for bare powerpc-linux-gnu or powerpc-linux-musl — the ABI suffix is
-      # required.  The 750fx has a hardware FPU so hf is correct and gives better
-      # float performance.  musl gives a fully static binary with strict IEEE 754
-      # semantics, ideal for scientific / linear-algebra workloads.
-      ZIG_TARGET:  powerpc-linux-musleabihf
-      # CPU baseline is safe for any 32-bit PPC including the 750fx (G3).
-      # The 750fx has no AltiVec, so we must not use a cpu that enables it.
-      ZIG_CPU:     baseline
 
     steps:
-      # Free runners ship with a lot of pre-installed toolchains we don't need.
-      # Reclaim as much disk as possible before the multi-GB LLVM build.
-      - name: Free up runner disk space
-        run: |
-          sudo rm -rf \
-            /usr/share/dotnet \
-            /usr/local/lib/android \
-            /usr/local/.ghcup \
-            /opt/ghc \
-            /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/boost \
-            /usr/share/swift \
-            /usr/local/julia* \
-            /usr/lib/jvm \
-            /usr/share/miniconda
-          sudo docker image prune --all --force 2>/dev/null || true
-          sudo apt-get clean -y
-          sudo apt-get autoremove -y -qq
-          df -h
-
       - name: Install build dependencies
         run: |
-          sudo apt-get install -y -qq cmake ninja-build xz-utils python3
+          sudo apt-get install -y -qq xz-utils
 
-      # Clone zig-bootstrap using the same logic as the prepare job.
-      - name: Clone zig-bootstrap from Codeberg
+      # Clone with --recurse-submodules to populate bootstrap/zig/ (the Zig source tree).
+      # The build step runs `zig build` directly using the pre-built host Zig binary —
+      # no cmake or LLVM compilation required.
+      - name: Clone zig-bootstrap from Codeberg (with Zig source submodule)
         run: |
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             BOOTSTRAP_REF="${{ github.ref_name }}"
             BOOTSTRAP_REF="${BOOTSTRAP_REF#v}"
-            git clone --depth 1 --branch "$BOOTSTRAP_REF" \
+            git clone --recurse-submodules --shallow-submodules --depth 1 \
+              --branch "$BOOTSTRAP_REF" \
               https://codeberg.org/ziglang/zig-bootstrap.git bootstrap 2>/dev/null || \
-            git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git bootstrap
+            git clone --recurse-submodules --shallow-submodules --depth 1 \
+              https://codeberg.org/ziglang/zig-bootstrap.git bootstrap
           else
-            git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git bootstrap
+            git clone --recurse-submodules --shallow-submodules --depth 1 \
+              https://codeberg.org/ziglang/zig-bootstrap.git bootstrap
           fi
           echo "Cloned at commit: $(git -C bootstrap rev-parse --short HEAD)"
+          if [[ ! -f bootstrap/zig/build.zig ]]; then
+            echo "ERROR: bootstrap/zig/build.zig not found after --recurse-submodules."
+            echo "zig-bootstrap may have changed its directory structure."
+            exit 1
+          fi
+          echo "Zig source submodule: present"
 
-      # Cache only the final Zig install (~150 MB), not the multi-GB build dirs.
-      # A cache hit skips the entire 5-hour build.  Key includes version+target+cpu
-      # so any upstream change busts the cache and triggers a fresh build.
+      # Cache only the final Zig install (~150 MB).  Key includes LLVM_ARTIFACT_TAG so
+      # that bumping the LLVM pin busts the cache and triggers a fresh Zig build.
       - name: Restore cached Zig binary
         id: cache-zig
         uses: actions/cache@v4
         with:
           path: bootstrap/out/zig-${{ env.ZIG_TARGET }}-${{ env.ZIG_CPU }}
-          key: zig-${{ env.ZIG_VERSION }}-${{ env.ZIG_TARGET }}-${{ env.ZIG_CPU }}-v1
+          key: zig-${{ env.ZIG_VERSION }}-${{ env.ZIG_TARGET }}-${{ env.ZIG_CPU }}-llvm${{ env.LLVM_ARTIFACT_TAG }}-v1
 
-      # zig-bootstrap runs two full LLVM compilations (host + cross-target).
-      # Patches applied here address two failure modes:
-      #
-      # 1. DISK: each intermediate cmake build dir grows to ~10 GB but is never
-      #    cleaned up.  Insert rm -rf after each cmake install to free space.
-      #    Also delete LLVM/zlib/zstd source trees once the cross-build is done.
-      #
-      # 2. OOM / DISK: host LLVM/Zig are build-time tools only; we don't care
-      #    about their runtime speed.  MinSizeRel (-Os) reduces per-compile-job
-      #    RAM and .o file sizes by ~30-50% vs Release (-O2/-O3).  Two sed passes
-      #    change exactly the first two CMAKE_BUILD_TYPE=Release occurrences
-      #    (host LLVM cmake, host Zig cmake) leaving cross-LLVM as Release.
-      - name: Patch zig-bootstrap to free disk between build stages
+      - name: Download pre-built LLVM artifact
         if: steps.cache-zig.outputs.cache-hit != 'true'
         run: |
-          # --- build dir cleanup after each cmake install ---
-          sed -i '/# Now we build Zig, still with system/i rm -rf "$ROOTDIR/out/build-llvm-host"' bootstrap/build
-          sed -i '/# Now we have Zig as a cross compiler/i rm -rf "$ROOTDIR/out/build-zig-host"' bootstrap/build
-          sed -i '/# Finally, we can cross compile Zig itself/i rm -rf "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"' bootstrap/build
-          # --- delete source trees once cross-LLVM no longer needs them ---
-          sed -i '/# Finally, we can cross compile Zig itself/i rm -rf "$ROOTDIR/llvm" "$ROOTDIR/zlib" "$ROOTDIR/zstd"' bootstrap/build
-          # --- MinSizeRel for host builds (first two CMAKE_BUILD_TYPE=Release) ---
-          sed -i '0,/-DCMAKE_BUILD_TYPE=Release/{s/-DCMAKE_BUILD_TYPE=Release/-DCMAKE_BUILD_TYPE=MinSizeRel/}' bootstrap/build
-          sed -i '0,/-DCMAKE_BUILD_TYPE=Release/{s/-DCMAKE_BUILD_TYPE=Release/-DCMAKE_BUILD_TYPE=MinSizeRel/}' bootstrap/build
-          echo "=== Disk before build ==="
-          df -h
-          echo "=== Verified patch insertions ==="
-          grep -n 'rm -rf\|CMAKE_BUILD_TYPE' bootstrap/build
+          echo "Downloading LLVM artifacts from $LLVM_ARTIFACT_REPO @ $LLVM_ARTIFACT_TAG"
+          gh release download "$LLVM_ARTIFACT_TAG" \
+            --repo "$LLVM_ARTIFACT_REPO" \
+            --pattern 'llvm-host-zig.tar.xz' \
+            --pattern 'llvm-cross-powerpc32.tar.xz' \
+            --dir /tmp/llvm-artifacts
+          ls -lah /tmp/llvm-artifacts/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build LLVM + Zig for PowerPC 32-bit
+      - name: Extract LLVM artifact
+        if: steps.cache-zig.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bootstrap/out/host
+          tar -xJf /tmp/llvm-artifacts/llvm-host-zig.tar.xz -C bootstrap/out/host
+
+          tar -xJf /tmp/llvm-artifacts/llvm-cross-powerpc32.tar.xz -C bootstrap/out
+
+          echo "Host Zig: $(file bootstrap/out/host/bin/zig)"
+          N=$(ls bootstrap/out/$ZIG_TARGET-$ZIG_CPU/lib/*.a 2>/dev/null | wc -l)
+          echo "Cross LLVM: $N static libs in bootstrap/out/$ZIG_TARGET-$ZIG_CPU/lib/"
+
+      # Runs the final stage of what zig-bootstrap's ./build script would do, using
+      # the same flags.  LLVM is already in place from the downloaded artifact.
+      - name: Build Zig for PowerPC 32-bit
         if: steps.cache-zig.outputs.cache-hit != 'true'
         run: |
           echo "=== Building Zig $ZIG_VERSION for $ZIG_TARGET (cpu=$ZIG_CPU) ==="
-          echo "First run: ~5 hours (two LLVM compilations + Zig).  Cached after success."
-          cd bootstrap
-          ./build "$ZIG_TARGET" "$ZIG_CPU"
-          echo "=== Disk after build ==="
-          df -h
+          ROOTDIR="$PWD/bootstrap"
+          ZIG="$ROOTDIR/out/host/bin/zig"
+          cd bootstrap/zig
+          "$ZIG" build \
+            --prefix "$ROOTDIR/out/zig-$ZIG_TARGET-$ZIG_CPU" \
+            --search-prefix "$ROOTDIR/out/$ZIG_TARGET-$ZIG_CPU" \
+            -Dflat \
+            -Dstatic-llvm \
+            -Doptimize=ReleaseFast \
+            -Dstrip \
+            -Dtarget="$ZIG_TARGET" \
+            -Dcpu="$ZIG_CPU" \
+            -Dversion-string="$ZIG_VERSION"
 
       - name: Verify build output
         run: |
@@ -293,7 +296,8 @@ jobs:
           echo "| Zig version | \`${ZIG_VERSION}\` |"                                                             >> "$NOTE"
           echo "| Target triple | \`${ZIG_TARGET}\` |"                                                            >> "$NOTE"
           echo "| CPU | \`${ZIG_CPU}\` (safe for 750fx — no AltiVec) |"                                          >> "$NOTE"
-          echo "| libc | musl (statically linked — no runtime glibc dependency) |"                              >> "$NOTE"
+          echo "| libc | musl (statically linked — no runtime glibc dependency) |"                                >> "$NOTE"
+          echo "| LLVM artifact | [\`${LLVM_ARTIFACT_TAG}\`](https://github.com/${LLVM_ARTIFACT_REPO}/releases/tag/${LLVM_ARTIFACT_TAG}) from \`${LLVM_ARTIFACT_REPO}\` |" >> "$NOTE"
           echo "| Built with | [zig-bootstrap](https://codeberg.org/ziglang/zig-bootstrap) on GitHub Actions |"   >> "$NOTE"
           echo "| Runner | ubuntu-latest (x86_64) |"                                                               >> "$NOTE"
 
