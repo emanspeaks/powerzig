@@ -49,13 +49,19 @@ jobs:
         run: |
           if [[ -n "${{ inputs.llvm_tag }}" ]]; then
             TAG="${{ inputs.llvm_tag }}"
+            # Pinned tag: verify it actually exists
+            if ! gh release view "$TAG" --repo emanspeaks/powerzig-bootstrap &>/dev/null; then
+              echo "ERROR: pinned llvm_tag '$TAG' does not exist in emanspeaks/powerzig-bootstrap"
+              exit 1
+            fi
             echo "Using pinned LLVM tag: $TAG"
           else
             TAG=$(gh release list --repo emanspeaks/powerzig-bootstrap --limit 1 \
               --json tagName --jq '.[0].tagName // ""')
             if [[ -z "$TAG" ]]; then
-              echo "ERROR: no releases found in emanspeaks/powerzig-bootstrap"
-              exit 1
+              echo "No releases found in emanspeaks/powerzig-bootstrap — skipping build"
+              echo "llvm_tag=" >> "$GITHUB_OUTPUT"
+              exit 0
             fi
             echo "Latest LLVM artifact tag: $TAG"
           fi
@@ -63,6 +69,7 @@ jobs:
 
       - name: Clone zig-bootstrap (for commit hash and Zig version)
         id: clone
+        if: steps.llvm.outputs.llvm_tag != ''
         run: |
           git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git bootstrap-meta
           COMMIT=$(git -C bootstrap-meta rev-parse --short HEAD)
@@ -83,6 +90,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           LLVM_TAG="${{ steps.llvm.outputs.llvm_tag }}"
+
+          # No LLVM artifacts exist yet — skip silently
+          if [[ -z "$LLVM_TAG" ]]; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "No LLVM artifacts available — skipping"
+            exit 0
+          fi
+
           EVENT="${{ github.event_name }}"
           REF="${{ github.ref }}"
           IS_MAIN="false"
