@@ -1,0 +1,235 @@
+name: Build Zig for PowerPC 32-bit
+
+# Cross-compiles Zig for powerpc-linux-musleabihf using pre-built LLVM artifacts
+# from emanspeaks/powerzig-bootstrap, and publishes the result as a GitHub Release.
+#
+# Releases use this repo's own sequential versioning (v1, v2, …).
+# The LLVM artifact tag consumed is recorded in each release's notes so the
+# dependency chain is fully traceable.
+#
+# Triggers:
+#   push to main      — always builds (push to this repo = something changed)
+#   workflow_dispatch — manual run; optionally pin a specific LLVM artifact tag
+#   schedule (weekly) — only builds if the latest powerzig-bootstrap release
+#                        has a newer LLVM tag than what the last Zig release used
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      llvm_tag:
+        description: 'LLVM artifact tag from powerzig-bootstrap (e.g. v3). Leave empty for latest.'
+        type: string
+        required: false
+  schedule:
+    # Sunday 08:00 UTC — runs after powerzig-bootstrap’s Sunday 03:00 UTC build
+    # has had time to publish its release.
+    - cron: '0 8 * * 0'
+
+permissions:
+  contents: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────────
+  # Resolve LLVM artifact tag, compute release tag, decide if build is needed.
+  # ─────────────────────────────────────────────────────────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      llvm_tag:     ${{ steps.llvm.outputs.llvm_tag }}
+      release_tag:  ${{ steps.tag.outputs.release_tag }}
+      should_build: ${{ steps.gate.outputs.should_build }}
+    steps:
+      - name: Resolve LLVM artifact tag
+        id: llvm
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ -n "${{ inputs.llvm_tag }}" ]]; then
+            TAG="${{ inputs.llvm_tag }}"
+            echo "Using pinned LLVM tag: $TAG"
+          else
+            TAG=$(gh release list --repo emanspeaks/powerzig-bootstrap --limit 1 \
+              --json tagName --jq '.[0].tagName // ""')
+            if [[ -z "$TAG" ]]; then
+              echo "ERROR: no releases found in emanspeaks/powerzig-bootstrap"
+              exit 1
+            fi
+            echo "Latest LLVM artifact tag: $TAG"
+          fi
+          echo "llvm_tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LATEST=$(gh release list --repo "${{ github.repository }}" --limit 50 \
+            --json tagName --jq '[.[].tagName | select(test("^v[0-9]+$"))] | sort_by(ltrimstr("v") | tonumber) | last // "v0"')
+          N=$(echo "$LATEST" | grep -oE '[0-9]+')
+          TAG="v$((N + 1))"
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Next release tag: $TAG (latest was $LATEST)"
+
+      - name: Determine if build is needed
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LLVM_TAG="${{ steps.llvm.outputs.llvm_tag }}"
+          EVENT="${{ github.event_name }}"
+
+          # push + dispatch: always build
+          if [[ "$EVENT" == "push" || "$EVENT" == "workflow_dispatch" ]]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "$EVENT event — building with LLVM artifact $LLVM_TAG"
+            exit 0
+          fi
+
+          # schedule: only build if the LLVM tag changed since the last Zig release
+          LATEST_RELEASE=$(gh release list --repo "${{ github.repository }}" --limit 1 \
+            --json tagName --jq '.[0].tagName // ""')
+          if [[ -n "$LATEST_RELEASE" ]]; then
+            PREV_LLVM=$(gh release view "$LATEST_RELEASE" --repo "${{ github.repository }}" \
+              --json body --jq '.body' | grep -oP '(?<=LLVM artifact: \`)[^\`]+' || true)
+            if [[ "$PREV_LLVM" == "$LLVM_TAG" ]]; then
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+              echo "LLVM artifact $LLVM_TAG unchanged since $LATEST_RELEASE — skipping"
+              exit 0
+            fi
+            echo "LLVM artifact changed: $PREV_LLVM → $LLVM_TAG"
+          else
+            echo "No existing releases — first build"
+          fi
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+
+  # ─────────────────────────────────────────────────────────────────────────────────
+  # Download pre-built LLVM artifacts and cross-compile Zig for PPC32.
+  # ─────────────────────────────────────────────────────────────────────────────────
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      LLVM_TAG:    ${{ needs.prepare.outputs.llvm_tag }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      LLVM_REPO:   emanspeaks/powerzig-bootstrap
+      ZIG_TARGET:  powerpc-linux-musleabihf
+      ZIG_CPU:     baseline
+
+    steps:
+      - name: Install build dependencies
+        run: sudo apt-get install -y -qq xz-utils
+
+      - name: Clone zig-bootstrap (for Zig source)
+        run: |
+          git clone --depth 1 --recurse-submodules --shallow-submodules \
+            https://codeberg.org/ziglang/zig-bootstrap.git bootstrap
+          COMMIT=$(git -C bootstrap rev-parse --short HEAD)
+          echo "BOOTSTRAP_COMMIT=$COMMIT" >> "$GITHUB_ENV"
+          echo "Cloned zig-bootstrap at: $COMMIT"
+          # Capture the Zig version
+          if [[ -f bootstrap/zig-version ]]; then
+            ZV=$(tr -d '[:space:]' < bootstrap/zig-version)
+          else
+            ZV=$(grep -m1 'ZIG_VERSION' bootstrap/build | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^"'\''[:space:]]*' || echo "unknown")
+          fi
+          echo "ZIG_VERSION=$ZV" >> "$GITHUB_ENV"
+          echo "Zig version: $ZV"
+
+      - name: Verify Zig source is present
+        run: |
+          if [[ ! -f bootstrap/zig/build.zig ]]; then
+            echo "ERROR: bootstrap/zig/build.zig not found"
+            echo "zig-bootstrap may not ship Zig as a git submodule."
+            echo "Check upstream: does 'git -C bootstrap submodule status' show a zig submodule?"
+            git -C bootstrap submodule status || true
+            find bootstrap -name 'build.zig' -maxdepth 4 || true
+            exit 1
+          fi
+          echo "Zig source OK: $(ls bootstrap/zig/build.zig)"
+
+      - name: Download LLVM artifacts from powerzig-bootstrap ${{ env.LLVM_TAG }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$LLVM_TAG" \
+            --repo "$LLVM_REPO" \
+            --pattern "llvm-host-zig.tar.xz" \
+            --pattern "llvm-cross-powerpc32.tar.xz"
+          ls -lah llvm-host-zig.tar.xz llvm-cross-powerpc32.tar.xz
+
+      - name: Extract artifacts into zig-bootstrap out/ layout
+        run: |
+          # Host: out/host/bin/zig
+          mkdir -p bootstrap/out/host
+          tar -xJf llvm-host-zig.tar.xz -C bootstrap/out/host
+          chmod +x bootstrap/out/host/bin/zig
+          echo "Host Zig: $(bootstrap/out/host/bin/zig version)"
+
+          # Cross LLVM: out/$TARGET-$CPU/
+          tar -xJf llvm-cross-powerpc32.tar.xz -C bootstrap/out
+          echo "Cross LLVM libs: $(ls bootstrap/out/$ZIG_TARGET-$ZIG_CPU/lib/*.a 2>/dev/null | wc -l) static libs"
+
+      - name: Cross-compile Zig for ${{ env.ZIG_TARGET }}
+        run: |
+          HOST_ZIG="$(pwd)/bootstrap/out/host/bin/zig"
+          CROSS_PREFIX="$(pwd)/bootstrap/out/$ZIG_TARGET-$ZIG_CPU"
+          HOST_PREFIX="$(pwd)/bootstrap/out/host"
+          OUT_DIR="$(pwd)/out"
+
+          mkdir -p "$OUT_DIR"
+
+          cd bootstrap/zig
+          "$HOST_ZIG" build \
+            --prefix "$OUT_DIR" \
+            -Dtarget="$ZIG_TARGET" \
+            -Dcpu="$ZIG_CPU" \
+            -Doptimize=ReleaseFast \
+            --search-prefix "$CROSS_PREFIX" \
+            --search-prefix "$HOST_PREFIX"
+
+      - name: Verify output binary
+        run: |
+          ZIG_BIN="out/bin/zig"
+          [[ ! -f "$ZIG_BIN" ]] && echo "ERROR: $ZIG_BIN not found" && find out -maxdepth 4 | sort && exit 1
+          file "$ZIG_BIN"
+          file "$ZIG_BIN" | grep -iE 'PowerPC|32.*big' \
+            || { echo "ERROR: binary does not appear to be PPC32 big-endian"; exit 1; }
+
+      - name: Package
+        run: |
+          ARCHIVE="zig-$ZIG_TARGET-$RELEASE_TAG.tar.xz"
+          tar -cJf "$ARCHIVE" -C out .
+          ls -lah "$ARCHIVE"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARCHIVE="zig-$ZIG_TARGET-$RELEASE_TAG.tar.xz"
+          gh release create "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            --title "Zig $ZIG_VERSION for PowerPC 32-bit $RELEASE_TAG" \
+            --notes "$(cat <<NOTES
+Zig compiler cross-compiled for \`$ZIG_TARGET\`.
+
+| Field | Value |
+|---|---|
+| Release tag | \`$RELEASE_TAG\` |
+| Zig version | \`$ZIG_VERSION\` |
+| Target | \`$ZIG_TARGET\` |
+| CPU | \`$ZIG_CPU\` |
+| LLVM artifact | \`$LLVM_TAG\` (from [powerzig-bootstrap $LLVM_TAG](https://github.com/$LLVM_REPO/releases/tag/$LLVM_TAG)) |
+| zig-bootstrap commit | \`$BOOTSTRAP_COMMIT\` |
+
+**Files:**
+- \`$ARCHIVE\` — Zig install prefix for \`$ZIG_TARGET\` (contains \`bin/zig\` and \`lib/\`)
+NOTES
+)" \
+            --prerelease \
+            "$ARCHIVE"
