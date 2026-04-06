@@ -130,7 +130,7 @@ jobs:
               echo "LLVM artifact $LLVM_TAG unchanged since $LATEST_RELEASE — skipping"
               exit 0
             fi
-            echo "LLVM artifact changed: $PREV_LLVM \u2192 $LLVM_TAG"
+            echo "LLVM artifact changed: $PREV_LLVM → $LLVM_TAG"
           else
             echo "No existing releases — first build"
           fi
@@ -167,8 +167,12 @@ jobs:
       LLVM_REPO:        emanspeaks/powerzig-bootstrap
       ZIG_TARGET:       powerpc-linux-musleabihf
       ZIG_CPU:          baseline
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Restore build cache
         id: cache
         uses: actions/cache/restore@v4
@@ -265,21 +269,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ARCHIVE="zig-$ZIG_TARGET-$RELEASE_TAG.tar.xz"
-          printf '%s\n' \
-            "Zig compiler cross-compiled for \`$ZIG_TARGET\`." \
-            "" \
-            "| Field | Value |" \
-            "|---|---|" \
-            "| Release tag | \`$RELEASE_TAG\` |" \
-            "| Zig version | \`$ZIG_VERSION\` |" \
-            "| Target | \`$ZIG_TARGET\` |" \
-            "| CPU | \`$ZIG_CPU\` |" \
-            "| LLVM artifact | \`$LLVM_TAG\` (from [powerzig-bootstrap $LLVM_TAG](https://github.com/$LLVM_REPO/releases/tag/$LLVM_TAG)) |" \
-            "| zig-bootstrap commit | \`$BOOTSTRAP_COMMIT\` |" \
-            "" \
-            "**Files:**" \
-            "- \`$ARCHIVE\` \u2014 Zig install prefix for \`$ZIG_TARGET\` (contains \`bin/zig\` and \`lib/\`)" \
-            > /tmp/release-notes.md
+          envsubst < .github/release-notes/zig-template.md > /tmp/release-notes.md
           gh release create "$RELEASE_TAG" \
             --repo "${{ github.repository }}" \
             --title "Zig $ZIG_VERSION for PowerPC 32-bit $RELEASE_TAG" \
