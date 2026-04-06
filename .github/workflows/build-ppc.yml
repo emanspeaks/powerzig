@@ -22,7 +22,7 @@ on:
         type: string
         required: false
   schedule:
-    # Sunday 08:00 UTC — after powerzig-bootstrap’s Sunday 03:00 UTC build.
+    # Sunday 08:00 UTC — after powerzig-bootstrap's Sunday 03:00 UTC build.
     - cron: '0 8 * * 0'
 
 permissions:
@@ -71,7 +71,7 @@ jobs:
           if [[ -f bootstrap-meta/zig-version ]]; then
             ZV=$(tr -d '[:space:]' < bootstrap-meta/zig-version)
           else
-            ZV=$(grep -m1 'ZIG_VERSION' bootstrap-meta/build | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^"'\''[:space:]]*' || echo "unknown")
+            ZV=$(grep -m1 'ZIG_VERSION' bootstrap-meta/build | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^" [:space:]]*' || echo "unknown")
           fi
           echo "zig_version=$ZV" >> "$GITHUB_OUTPUT"
           echo "Zig version: $ZV"
@@ -107,14 +107,14 @@ jobs:
             --json tagName --jq '.[0].tagName // ""')
           if [[ -n "$LATEST_RELEASE" ]]; then
             PREV_LLVM=$(gh release view "$LATEST_RELEASE" --repo "${{ github.repository }}" \
-              --json body --jq '.body' | grep -oP '(?<=LLVM artifact: \`)[^\`]+' || true)
+              --json body --jq '.body' | grep -oP '(?<=LLVM artifact: `)[^`]+' || true)
             if [[ "$PREV_LLVM" == "$LLVM_TAG" ]]; then
               echo "should_build=false" >> "$GITHUB_OUTPUT"
               echo "should_release=false" >> "$GITHUB_OUTPUT"
               echo "LLVM artifact $LLVM_TAG unchanged since $LATEST_RELEASE — skipping"
               exit 0
             fi
-            echo "LLVM artifact changed: $PREV_LLVM → $LLVM_TAG"
+            echo "LLVM artifact changed: $PREV_LLVM \u2192 $LLVM_TAG"
           else
             echo "No existing releases — first build"
           fi
@@ -249,24 +249,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ARCHIVE="zig-$ZIG_TARGET-$RELEASE_TAG.tar.xz"
+          printf '%s\n' \
+            "Zig compiler cross-compiled for \`$ZIG_TARGET\`." \
+            "" \
+            "| Field | Value |" \
+            "|---|---|" \
+            "| Release tag | \`$RELEASE_TAG\` |" \
+            "| Zig version | \`$ZIG_VERSION\` |" \
+            "| Target | \`$ZIG_TARGET\` |" \
+            "| CPU | \`$ZIG_CPU\` |" \
+            "| LLVM artifact | \`$LLVM_TAG\` (from [powerzig-bootstrap $LLVM_TAG](https://github.com/$LLVM_REPO/releases/tag/$LLVM_TAG)) |" \
+            "| zig-bootstrap commit | \`$BOOTSTRAP_COMMIT\` |" \
+            "" \
+            "**Files:**" \
+            "- \`$ARCHIVE\` \u2014 Zig install prefix for \`$ZIG_TARGET\` (contains \`bin/zig\` and \`lib/\`)" \
+            > /tmp/release-notes.md
           gh release create "$RELEASE_TAG" \
             --repo "${{ github.repository }}" \
             --title "Zig $ZIG_VERSION for PowerPC 32-bit $RELEASE_TAG" \
-            --notes "$(cat <<NOTES
-Zig compiler cross-compiled for \`$ZIG_TARGET\`.
-
-| Field | Value |
-|---|---|
-| Release tag | \`$RELEASE_TAG\` |
-| Zig version | \`$ZIG_VERSION\` |
-| Target | \`$ZIG_TARGET\` |
-| CPU | \`$ZIG_CPU\` |
-| LLVM artifact | \`$LLVM_TAG\` (from [powerzig-bootstrap $LLVM_TAG](https://github.com/$LLVM_REPO/releases/tag/$LLVM_TAG)) |
-| zig-bootstrap commit | \`$BOOTSTRAP_COMMIT\` |
-
-**Files:**
-- \`$ARCHIVE\` — Zig install prefix for \`$ZIG_TARGET\` (contains \`bin/zig\` and \`lib/\`)
-NOTES
-)" \
+            --notes-file /tmp/release-notes.md \
             --prerelease \
             "$ARCHIVE"
