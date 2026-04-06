@@ -28,10 +28,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # ─────────────────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────────────────
   # Resolve LLVM tag and bootstrap commit, decide whether to build and/or release.
-  # ─────────────────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────────────────
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -123,7 +127,7 @@ jobs:
             --json tagName --jq '.[0].tagName // ""')
           if [[ -n "$LATEST_RELEASE" ]]; then
             PREV_LLVM=$(gh release view "$LATEST_RELEASE" --repo "${{ github.repository }}" \
-              --json body --jq '.body' | grep -oP '(?<=LLVM artifact: `)[^`]+' || true)
+              --json body --jq '.body' | grep -oP '(?<=LLVM artifact: \`)[^\`]+' || true)
             if [[ "$PREV_LLVM" == "$LLVM_TAG" ]]; then
               echo "should_build=false" >> "$GITHUB_OUTPUT"
               echo "should_release=false" >> "$GITHUB_OUTPUT"
@@ -150,9 +154,9 @@ jobs:
           echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Next release tag: $TAG (latest was $LATEST)"
 
-  # ─────────────────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────────────────
   # Download LLVM artifacts, cross-compile Zig, cache result, publish if releasing.
-  # ─────────────────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────────────────
   build:
     needs: prepare
     if: needs.prepare.outputs.should_build == 'true'
