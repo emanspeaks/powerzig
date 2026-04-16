@@ -1,0 +1,177 @@
+name: Build Zig for PowerPC 32-bit
+
+# Downloads pre-built host Zig + cross LLVM from a powerzig-bootstrap release,
+# then cross-compiles Zig itself for powerpc-linux-musleabihf and publishes it.
+#
+# The output tarball uses -Dflat layout:
+#   zig               — ELF binary for powerpc-linux-musleabihf
+#   lib/              — Zig standard library (platform-independent source)
+#
+# Triggers:
+#   workflow_dispatch — manual run, always publishes
+#   push to main      — publishes if bootstrap release changed since last run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to create (e.g. v1). Auto-increments if omitted.'
+        type: string
+        required: false
+      bootstrap_release:
+        description: 'powerzig-bootstrap release tag to use (default: latest)'
+        type: string
+        required: false
+        default: 'latest'
+      force_rebuild:
+        description: 'Overwrite existing release if it already exists'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_TARGET: powerpc-linux-musleabihf
+  ZIG_CPU:    baseline
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Download powerzig-bootstrap artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BOOTSTRAP_RELEASE="${{ inputs.bootstrap_release || 'latest' }}"
+          gh release download "$BOOTSTRAP_RELEASE" \
+            --repo emanspeaks/powerzig-bootstrap \
+            --pattern "llvm-host-zig.tar.xz" \
+            --pattern "llvm-cross-powerpc32.tar.xz"
+
+          # Pull the bootstrap commit and Zig version from the release notes so
+          # we clone exactly the zig-bootstrap version that built these artifacts.
+          RELEASE_BODY=$(gh release view "$BOOTSTRAP_RELEASE" \
+            --repo emanspeaks/powerzig-bootstrap \
+            --json body --jq '.body')
+          BOOTSTRAP_COMMIT=$(echo "$RELEASE_BODY" | grep -oP '(?<=zig-bootstrap commit: `)[^`]+' || echo "HEAD")
+          ZIG_VERSION=$(echo "$RELEASE_BODY" | grep -oP '(?<=Zig version in zig-bootstrap: `)[^`]+' || echo "")
+          echo "BOOTSTRAP_COMMIT=$BOOTSTRAP_COMMIT" >> "$GITHUB_ENV"
+          echo "ZIG_VERSION=$ZIG_VERSION"           >> "$GITHUB_ENV"
+          echo "bootstrap_commit=$BOOTSTRAP_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Bootstrap commit: $BOOTSTRAP_COMMIT  Zig version: $ZIG_VERSION"
+        id: bootstrap
+
+      - name: Set up host Zig
+        run: |
+          mkdir -p zig-host
+          tar -xJf llvm-host-zig.tar.xz -C zig-host
+          chmod +x zig-host/bin/zig
+          # Resolve version from binary if release notes didn't have it
+          if [[ -z "$ZIG_VERSION" ]]; then
+            ZIG_VERSION=$(zig-host/bin/zig version)
+            echo "ZIG_VERSION=$ZIG_VERSION" >> "$GITHUB_ENV"
+          fi
+          echo "Host Zig: $(zig-host/bin/zig version)"
+          ls zig-host/lib/zig/ | head -5
+
+      - name: Set up cross LLVM prefix
+        run: |
+          mkdir -p cross-prefix
+          # Archive top-level dir is "$ZIG_TARGET-$ZIG_CPU"; strip it so
+          # cross-prefix/ contains include/ lib/ etc. directly.
+          tar -xJf llvm-cross-powerpc32.tar.xz -C cross-prefix --strip-components=1
+          echo "Cross LLVM: $(ls cross-prefix/lib/*.a 2>/dev/null | wc -l) static libs"
+
+      - name: Clone zig-bootstrap at matching commit
+        run: |
+          git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git
+          if [[ "$BOOTSTRAP_COMMIT" != "HEAD" ]]; then
+            git -C zig-bootstrap fetch --depth 1 origin "$BOOTSTRAP_COMMIT" 2>/dev/null || true
+            git -C zig-bootstrap checkout "$BOOTSTRAP_COMMIT" 2>/dev/null || true
+          fi
+          echo "zig-bootstrap at: $(git -C zig-bootstrap rev-parse --short HEAD)"
+
+      - name: Cross-compile Zig for PowerPC
+        run: |
+          ZIG="$(pwd)/zig-host/bin/zig"
+          SEARCH_PREFIX="$(pwd)/cross-prefix"
+          OUT="$(pwd)/out"
+          mkdir -p "$OUT"
+          cd zig-bootstrap/zig
+          "$ZIG" build \
+            --prefix "$OUT" \
+            --search-prefix "$SEARCH_PREFIX" \
+            -Dflat \
+            -Dstatic-llvm \
+            -Doptimize=ReleaseFast \
+            -Dstrip \
+            -Dtarget="$ZIG_TARGET" \
+            -Dcpu="$ZIG_CPU" \
+            -Dversion-string="$ZIG_VERSION"
+          df -h
+
+      - name: Verify and package
+        run: |
+          echo "=== Build output ==="
+          ls -lah out/
+          file out/zig
+          echo "=== Stdlib (first 10 entries) ==="
+          ls out/lib/ | head -10
+          # Flat layout: zig binary + lib/ stdlib at top level
+          tar -cJf zig-$ZIG_TARGET.tar.xz -C out .
+          ls -lah zig-$ZIG_TARGET.tar.xz
+
+      - name: Determine release tag
+        id: tag
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.release_tag }}" ]]; then
+            TAG="${{ inputs.release_tag }}"
+          else
+            LATEST=$(gh release list --repo "${{ github.repository }}" --limit 50 \
+              --json tagName --jq '[.[].tagName | select(test("^v[0-9]+$"))] | sort_by(ltrimstr("v") | tonumber) | last // "v0"')
+            N=$(echo "$LATEST" | grep -oE '[0-9]+')
+            TAG="v$((N + 1))"
+            echo "Auto-increment — next tag: $TAG (latest was $LATEST)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
+      - name: Delete existing release (force-rebuild only)
+        if: (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && inputs.force_rebuild == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete "${{ steps.tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --cleanup-tag \
+            --yes 2>/dev/null || true
+
+      - name: Publish release
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "Zig $ZIG_VERSION for $ZIG_TARGET ${{ steps.tag.outputs.tag }}" \
+            --notes "Zig \`$ZIG_VERSION\` cross-compiled for \`$ZIG_TARGET\` (\`$ZIG_CPU\`).
+
+Built from [emanspeaks/powerzig-bootstrap](https://github.com/emanspeaks/powerzig-bootstrap) \
+zig-bootstrap commit \`$BOOTSTRAP_COMMIT\`.
+
+**Files:**
+- \`zig-$ZIG_TARGET.tar.xz\` — flat layout: \`zig\` binary + \`lib/\` stdlib" \
+            zig-$ZIG_TARGET.tar.xz
