@@ -164,14 +164,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          cat > /tmp/release-notes.md << EOF
+          Zig \`$ZIG_VERSION\` cross-compiled for \`$ZIG_TARGET\` (\`$ZIG_CPU\`).
+
+          Built from [emanspeaks/powerzig-bootstrap](https://github.com/emanspeaks/powerzig-bootstrap) zig-bootstrap commit \`$BOOTSTRAP_COMMIT\`.
+
+          **Files:**
+          - \`zig-$ZIG_TARGET.tar.xz\` — flat layout: \`zig\` binary + \`lib/\` stdlib
+          EOF
           gh release create "${{ steps.tag.outputs.tag }}" \
             --repo "${{ github.repository }}" \
             --title "Zig $ZIG_VERSION for $ZIG_TARGET ${{ steps.tag.outputs.tag }}" \
-            --notes "Zig \`$ZIG_VERSION\` cross-compiled for \`$ZIG_TARGET\` (\`$ZIG_CPU\`).
-
-Built from [emanspeaks/powerzig-bootstrap](https://github.com/emanspeaks/powerzig-bootstrap) \
-zig-bootstrap commit \`$BOOTSTRAP_COMMIT\`.
-
-**Files:**
-- \`zig-$ZIG_TARGET.tar.xz\` — flat layout: \`zig\` binary + \`lib/\` stdlib" \
+            --notes-file /tmp/release-notes.md \
             zig-$ZIG_TARGET.tar.xz
