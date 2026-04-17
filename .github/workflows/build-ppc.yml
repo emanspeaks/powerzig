@@ -46,17 +46,16 @@ jobs:
       should_build:      ${{ steps.gate.outputs.should_build }}
       should_release:    ${{ steps.gate.outputs.should_release }}
       should_prerelease: ${{ steps.gate.outputs.should_prerelease }}
-      bootstrap_commit:  ${{ steps.clone.outputs.bootstrap_commit }}
-      zig_version:       ${{ steps.clone.outputs.zig_version }}
+      bootstrap_commit:  ${{ steps.llvm.outputs.bootstrap_commit }}
+      zig_version:       ${{ steps.llvm.outputs.zig_version }}
     steps:
-      - name: Resolve LLVM artifact tag
+      - name: Resolve LLVM artifact tag and metadata
         id: llvm
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [[ -n "${{ inputs.llvm_tag }}" ]]; then
             TAG="${{ inputs.llvm_tag }}"
-            # Pinned tag: verify it actually exists
             if ! gh release view "$TAG" --repo emanspeaks/powerzig-bootstrap &>/dev/null; then
               echo "ERROR: pinned llvm_tag '$TAG' does not exist in emanspeaks/powerzig-bootstrap"
               exit 1
@@ -74,23 +73,13 @@ jobs:
             echo "Latest LLVM artifact tag: $TAG"
           fi
           echo "llvm_tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Clone zig-bootstrap (for commit hash and Zig version)
-        id: clone
-        if: steps.llvm.outputs.llvm_tag != ''
-        run: |
-          git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git bootstrap-meta
-          COMMIT=$(git -C bootstrap-meta rev-parse --short HEAD)
-          echo "bootstrap_commit=$COMMIT" >> "$GITHUB_OUTPUT"
-          echo "Bootstrap commit: $COMMIT"
-          if [[ -f bootstrap-meta/zig-version ]]; then
-            ZV=$(tr -d '[:space:]' < bootstrap-meta/zig-version)
-          else
-            ZV=$(grep -m1 'ZIG_VERSION' bootstrap-meta/build | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^" [:space:]]*' || echo "unknown")
-          fi
-          echo "zig_version=$ZV" >> "$GITHUB_OUTPUT"
-          echo "Zig version: $ZV"
-          rm -rf bootstrap-meta
+          # Parse bootstrap commit and Zig version from the release body — no clone needed.
+          BODY=$(gh release view "$TAG" --repo emanspeaks/powerzig-bootstrap --json body --jq '.body')
+          BOOTSTRAP_COMMIT=$(echo "$BODY" | grep 'zig-bootstrap commit' | grep -oP '`[^`]+`' | tr -d '`' | head -1 || echo "")
+          ZIG_VERSION=$(echo "$BODY" | grep 'Zig version in zig-bootstrap' | grep -oP '`[^`]+`' | tr -d '`' | head -1 || echo "unknown")
+          echo "bootstrap_commit=$BOOTSTRAP_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "zig_version=$ZIG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Bootstrap commit: $BOOTSTRAP_COMMIT  Zig version: $ZIG_VERSION"
 
       - name: Determine if build and release are needed
         id: gate
