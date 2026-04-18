@@ -217,6 +217,19 @@ jobs:
           fi
           echo "Zig source OK"
 
+      - name: Patch Zig cmake to accept PowerPC-only LLVM
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          FINDLLVM="bootstrap/zig/cmake/Findllvm.cmake"
+          [[ ! -f "$FINDLLVM" ]] && echo "ERROR: $FINDLLVM not found" && exit 1
+          # Zig normally requires all 20 LLVM targets. Our cross LLVM has only PowerPC
+          # (built with -DLLVM_TARGETS_TO_BUILD=PowerPC to stay under CI time limits).
+          # PowerPC Zig only needs to compile for PowerPC — no cross-compilation needed.
+          sed -i 's/^set(ZIG_LLVM_REQUIRED_TARGETS ".*")/set(ZIG_LLVM_REQUIRED_TARGETS "PowerPC")/' \
+            "$FINDLLVM"
+          echo "Patched $FINDLLVM — required targets now:"
+          grep 'ZIG_LLVM_REQUIRED_TARGETS' "$FINDLLVM" | head -3
+
       - name: Download LLVM artifacts from powerzig-bootstrap ${{ env.LLVM_TAG }}
         if: steps.cache.outputs.cache-hit != 'true'
         env:
