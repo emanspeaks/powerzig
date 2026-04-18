@@ -281,12 +281,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PRE_TAG="pre-$LLVM_TAG"
-          # Skip if pre-release already exists (previous build already uploaded)
-          if gh release view "$PRE_TAG" --repo "${{ github.repository }}" &>/dev/null; then
-            echo "Pre-release $PRE_TAG already exists — skipping"
-            exit 0
-          fi
+          PRE_TAG="pre-$LLVM_TAG-${{ github.run_id }}"
           ARCHIVE="zig-$ZIG_TARGET-$PRE_TAG.tar.xz"
           tar -cJf "$ARCHIVE" -C out .
           ls -lah "$ARCHIVE"
