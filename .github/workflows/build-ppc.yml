@@ -219,7 +219,11 @@ jobs:
 
       - name: Patch build.zig to remove non-PowerPC LLVM target libraries
         if: steps.cache.outputs.cache-hit != 'true'
-        run: python3 .github/scripts/patch-build-zig-ppc-only.py bootstrap/zig/build.zig "$(pwd)/.github/stubs/llvm-target-stubs.c"
+        run: |
+          # Copy stubs into bootstrap/zig/src/ so Zig's build system can find it
+          # with a simple in-tree path (avoids ../.. traversal outside package root).
+          cp .github/stubs/llvm-target-stubs.c bootstrap/zig/src/powerzig-stubs.c
+          python3 .github/scripts/patch-build-zig-ppc-only.py bootstrap/zig/build.zig
 
       - name: Download LLVM artifacts from powerzig-bootstrap ${{ env.LLVM_TAG }}
         if: steps.cache.outputs.cache-hit != 'true'

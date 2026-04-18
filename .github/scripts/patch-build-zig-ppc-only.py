@@ -15,9 +15,13 @@ Two changes are made:
    providing any real backend functionality.  The resulting PowerPC Zig binary
    simply cannot generate code for non-PowerPC targets, which is intentional.
 
-Usage: patch-build-zig-ppc-only.py <path/to/build.zig> <path/to/stubs.c>
+   Before calling this script, copy the stubs file into bootstrap/zig/src/:
+     cp .github/stubs/llvm-target-stubs.c bootstrap/zig/src/powerzig-stubs.c
+   The script then injects "src/powerzig-stubs.c" (an in-tree path that
+   Zig's build system handles without any ../ traversal issues).
+
+Usage: patch-build-zig-ppc-only.py <path/to/build.zig>
 """
-import os
 import re
 import sys
 
@@ -28,9 +32,9 @@ NON_PPC_TARGETS = [
     'WebAssembly', 'X86', 'XCore',
 ]
 
-# Relative path from bootstrap/zig/ (where build.zig lives) to the stubs file
-# at .github/stubs/llvm-target-stubs.c in the repo root.
-STUBS_RELATIVE = '../../.github/stubs/llvm-target-stubs.c'
+# In-tree path used in build.zig (relative to bootstrap/zig/, within the package).
+# The workflow copies .github/stubs/llvm-target-stubs.c here before this script runs.
+STUBS_IN_TREE = 'src/powerzig-stubs.c'
 
 # The last entry in zig_cpp_sources that we insert our stubs file after.
 LAST_CPP_SOURCE = '"src/zig_clang_cc1as_main.cpp",'
@@ -49,31 +53,25 @@ def remove_non_ppc_libs(lines):
     return kept, removed
 
 
-def inject_stubs(lines, stubs_path):
+def inject_stubs(lines):
     """Insert the stubs file into zig_cpp_sources after the last known entry."""
-    # Determine the path to use in the source: prefer a relative path (cleaner),
-    # fall back to the absolute path passed on the command line.
-    inject_path = STUBS_RELATIVE
-
     new_lines = []
     injected = False
     for line in lines:
         new_lines.append(line)
         if not injected and LAST_CPP_SOURCE in line:
-            # Preserve indentation of the existing entry.
             indent = len(line) - len(line.lstrip())
-            new_lines.append(' ' * indent + f'"{inject_path}",\n')
+            new_lines.append(' ' * indent + f'"{STUBS_IN_TREE}",\n')
             injected = True
     return new_lines, injected
 
 
 def main():
-    if len(sys.argv) < 3:
-        print(f'Usage: {sys.argv[0]} <path/to/build.zig> <path/to/stubs.c>')
+    if len(sys.argv) < 2:
+        print(f'Usage: {sys.argv[0]} <path/to/build.zig>')
         sys.exit(1)
 
     build_zig = sys.argv[1]
-    stubs_c = sys.argv[2]
 
     with open(build_zig) as f:
         lines = f.readlines()
@@ -91,12 +89,12 @@ def main():
         print(f'  ...and {len(removed) - 10} more')
 
     # --- Step 2: inject stubs file into zig_cpp_sources ---
-    lines, injected = inject_stubs(lines, stubs_c)
+    lines, injected = inject_stubs(lines)
     if not injected:
         print(f'WARNING: could not find insertion point "{LAST_CPP_SOURCE}" in {build_zig}')
         print('The zig_cpp_sources array format may have changed — manual review needed.')
         sys.exit(1)
-    print(f'\nInjected stubs file: {STUBS_RELATIVE}')
+    print(f'\nInjected stubs file: {STUBS_IN_TREE}')
 
     with open(build_zig, 'w') as f:
         f.writelines(lines)
