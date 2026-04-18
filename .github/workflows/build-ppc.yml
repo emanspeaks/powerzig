@@ -245,7 +245,7 @@ jobs:
           LLVM_CONFIG="$CROSS_PREFIX/bin/llvm-config"
 
           echo "Cross prefix: $CROSS_PREFIX"
-          echo "Available .a files: $(find $CROSS_PREFIX/lib -name '*.a' | wc -l)"
+          echo "Available .a files: $(find "$CROSS_PREFIX/lib" -name '*.a' | wc -l)"
 
           # llvm-config gives correctly-ordered lib list; fall back to find if absent
           if [[ -x "$LLVM_CONFIG" ]]; then
@@ -263,25 +263,27 @@ jobs:
           echo "Clang libs: $(echo "$CLANG_LIBS" | tr ';' '\n' | grep -c .)"
           echo "LLD libs: $(echo "$LLD_LIBS" | tr ';' '\n' | grep -c .)"
 
-          cat > "$CONFIG_H" <<EOFCFG
-#define ZIG_CMAKE_BINARY_DIR "${CROSS_PREFIX}"
-#define ZIG_CMAKE_PREFIX_PATH "${CROSS_PREFIX}"
-#define ZIG_CMAKE_STATIC_LIBRARY_PREFIX "lib"
-#define ZIG_CMAKE_STATIC_LIBRARY_SUFFIX ".a"
-#define ZIG_CXX_COMPILER "c++"
-#define ZIG_CXX_COMPILER_ARG1 ""
-#define ZIG_LLD_INCLUDE_PATH "${CROSS_PREFIX}/include"
-#define ZIG_LLD_LIBRARIES "${LLD_LIBS}"
-#define ZIG_CLANG_LIBRARIES "${CLANG_LIBS}"
-#define ZIG_LLVM_LIBRARIES "${LLVM_LIBS}"
-#define ZIG_LLVM_INCLUDE_PATH "${CROSS_PREFIX}/include"
-#define ZIG_LLVM_LIB_PATH "${CROSS_PREFIX}/lib"
-#define ZIG_LLVM_LINK_MODE "static"
-#define ZIG_SYSTEM_LIBCXX ""
-#define ZIG_DIA_GUIDS_LIB ""
-EOFCFG
-          echo "=== config.h (first 6 lines) ==="
-          head -6 "$CONFIG_H"
+          # Write config.h without a heredoc — bare #define lines at col 0 break YAML block scalars
+          printf '%s\n' \
+            "#define ZIG_CMAKE_BINARY_DIR \"${CROSS_PREFIX}\"" \
+            "#define ZIG_CMAKE_PREFIX_PATH \"${CROSS_PREFIX}\"" \
+            '#define ZIG_CMAKE_STATIC_LIBRARY_PREFIX "lib"' \
+            '#define ZIG_CMAKE_STATIC_LIBRARY_SUFFIX ".a"' \
+            '#define ZIG_CXX_COMPILER "c++"' \
+            '#define ZIG_CXX_COMPILER_ARG1 ""' \
+            "#define ZIG_LLD_INCLUDE_PATH \"${CROSS_PREFIX}/include\"" \
+            "#define ZIG_LLD_LIBRARIES \"${LLD_LIBS}\"" \
+            "#define ZIG_CLANG_LIBRARIES \"${CLANG_LIBS}\"" \
+            "#define ZIG_LLVM_LIBRARIES \"${LLVM_LIBS}\"" \
+            "#define ZIG_LLVM_INCLUDE_PATH \"${CROSS_PREFIX}/include\"" \
+            "#define ZIG_LLVM_LIB_PATH \"${CROSS_PREFIX}/lib\"" \
+            '#define ZIG_LLVM_LINK_MODE "static"' \
+            '#define ZIG_SYSTEM_LIBCXX ""' \
+            '#define ZIG_DIA_GUIDS_LIB ""' \
+            > "$CONFIG_H"
+
+          echo "=== config.h ==="
+          cat "$CONFIG_H"
 
       - name: Cross-compile Zig for ${{ env.ZIG_TARGET }}
         if: steps.cache.outputs.cache-hit != 'true'
