@@ -282,7 +282,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PRE_TAG="pre-$LLVM_TAG"
-          gh release delete "$PRE_TAG" --repo "${{ github.repository }}" --cleanup-tag --yes 2>/dev/null || true
+          gh release delete "$PRE_TAG" --repo "${{ github.repository }}" --yes 2>/dev/null || true
           ARCHIVE="zig-$ZIG_TARGET-$PRE_TAG.tar.xz"
           tar -cJf "$ARCHIVE" -C out .
           ls -lah "$ARCHIVE"
@@ -311,5 +311,5 @@ jobs:
             "$ARCHIVE"
           # Clean up any PR pre-release for this LLVM tag
           PRE_TAG="pre-$LLVM_TAG"
-          gh release delete "$PRE_TAG" --repo "${{ github.repository }}" --cleanup-tag --yes 2>/dev/null || true
+          gh release delete "$PRE_TAG" --repo "${{ github.repository }}" --yes 2>/dev/null || true
           echo "Full release created: $RELEASE_TAG"
