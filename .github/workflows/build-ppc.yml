@@ -282,7 +282,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PRE_TAG="pre-$LLVM_TAG"
-          gh release delete "$PRE_TAG" --repo "${{ github.repository }}" --yes 2>/dev/null || true
+          # Skip if pre-release already exists (previous build already uploaded)
+          if gh release view "$PRE_TAG" --repo "${{ github.repository }}" &>/dev/null; then
+            echo "Pre-release $PRE_TAG already exists — skipping"
+            exit 0
+          fi
           ARCHIVE="zig-$ZIG_TARGET-$PRE_TAG.tar.xz"
           tar -cJf "$ARCHIVE" -C out .
           ls -lah "$ARCHIVE"
@@ -309,7 +313,4 @@ jobs:
             --title "Zig $ZIG_VERSION for PowerPC 32-bit $RELEASE_TAG" \
             --notes-file /tmp/release-notes.md \
             "$ARCHIVE"
-          # Clean up any PR pre-release for this LLVM tag
-          PRE_TAG="pre-$LLVM_TAG"
-          gh release delete "$PRE_TAG" --repo "${{ github.repository }}" --yes 2>/dev/null || true
           echo "Full release created: $RELEASE_TAG"
