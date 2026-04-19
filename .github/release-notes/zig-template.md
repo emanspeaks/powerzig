@@ -10,4 +10,4 @@ Zig compiler cross-compiled for `$ZIG_TARGET`.
 | zig-bootstrap commit | `$BOOTSTRAP_COMMIT` |
 
 **Files:**
-- `$ARCHIVE` — Zig install prefix for `$ZIG_TARGET` (contains `bin/zig` and `lib/`)
+- `$ARCHIVE` — flat layout for `$ZIG_TARGET`: `zig` binary + `lib/` stdlib

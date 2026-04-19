@@ -15,6 +15,9 @@ name: Build Zig for PowerPC 32-bit
 
 on:
   push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       llvm_tag:
@@ -39,29 +42,30 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      llvm_tag:         ${{ steps.llvm.outputs.llvm_tag }}
-      release_tag:      ${{ steps.tag.outputs.release_tag }}
-      should_build:     ${{ steps.gate.outputs.should_build }}
-      should_release:   ${{ steps.gate.outputs.should_release }}
-      bootstrap_commit: ${{ steps.clone.outputs.bootstrap_commit }}
-      zig_version:      ${{ steps.clone.outputs.zig_version }}
+      llvm_tag:          ${{ steps.llvm.outputs.llvm_tag }}
+      release_tag:       ${{ steps.tag.outputs.release_tag }}
+      should_build:      ${{ steps.gate.outputs.should_build }}
+      should_release:    ${{ steps.gate.outputs.should_release }}
+      should_prerelease: ${{ steps.gate.outputs.should_prerelease }}
+      bootstrap_commit:  ${{ steps.llvm.outputs.bootstrap_commit }}
+      zig_version:       ${{ steps.llvm.outputs.zig_version }}
     steps:
-      - name: Resolve LLVM artifact tag
+      - name: Resolve LLVM artifact tag and metadata
         id: llvm
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [[ -n "${{ inputs.llvm_tag }}" ]]; then
             TAG="${{ inputs.llvm_tag }}"
-            # Pinned tag: verify it actually exists
             if ! gh release view "$TAG" --repo emanspeaks/powerzig-bootstrap &>/dev/null; then
               echo "ERROR: pinned llvm_tag '$TAG' does not exist in emanspeaks/powerzig-bootstrap"
               exit 1
             fi
             echo "Using pinned LLVM tag: $TAG"
           else
-            TAG=$(gh release list --repo emanspeaks/powerzig-bootstrap --limit 1 \
-              --json tagName --jq '.[0].tagName // ""')
+            TAG=$(gh release list --repo emanspeaks/powerzig-bootstrap --limit 20 \
+              --json tagName,isPrerelease \
+              --jq '[.[] | select(.isPrerelease == false)] | .[0].tagName // ""')
             if [[ -z "$TAG" ]]; then
               echo "No releases found in emanspeaks/powerzig-bootstrap — skipping build"
               echo "llvm_tag=" >> "$GITHUB_OUTPUT"
@@ -70,23 +74,13 @@ jobs:
             echo "Latest LLVM artifact tag: $TAG"
           fi
           echo "llvm_tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Clone zig-bootstrap (for commit hash and Zig version)
-        id: clone
-        if: steps.llvm.outputs.llvm_tag != ''
-        run: |
-          git clone --depth 1 https://codeberg.org/ziglang/zig-bootstrap.git bootstrap-meta
-          COMMIT=$(git -C bootstrap-meta rev-parse --short HEAD)
-          echo "bootstrap_commit=$COMMIT" >> "$GITHUB_OUTPUT"
-          echo "Bootstrap commit: $COMMIT"
-          if [[ -f bootstrap-meta/zig-version ]]; then
-            ZV=$(tr -d '[:space:]' < bootstrap-meta/zig-version)
-          else
-            ZV=$(grep -m1 'ZIG_VERSION' bootstrap-meta/build | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^" [:space:]]*' || echo "unknown")
-          fi
-          echo "zig_version=$ZV" >> "$GITHUB_OUTPUT"
-          echo "Zig version: $ZV"
-          rm -rf bootstrap-meta
+          # Parse bootstrap commit and Zig version from the release body — no clone needed.
+          BODY=$(gh release view "$TAG" --repo emanspeaks/powerzig-bootstrap --json body --jq '.body')
+          BOOTSTRAP_COMMIT=$(echo "$BODY" | grep 'zig-bootstrap commit' | grep -oP '`[^`]+`' | tr -d '`' | head -1 || echo "")
+          ZIG_VERSION=$(echo "$BODY" | grep 'Zig version in zig-bootstrap' | grep -oP '`[^`]+`' | tr -d '`' | head -1 || echo "unknown")
+          echo "bootstrap_commit=$BOOTSTRAP_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "zig_version=$ZIG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Bootstrap commit: $BOOTSTRAP_COMMIT  Zig version: $ZIG_VERSION"
 
       - name: Determine if build and release are needed
         id: gate
@@ -108,9 +102,20 @@ jobs:
           IS_MAIN="false"
           [[ "$REF" == "refs/heads/main" ]] && IS_MAIN="true"
 
+          if [[ "$EVENT" == "pull_request" ]]; then
+            IS_SAME_REPO="false"
+            [[ "${{ github.event.pull_request.head.repo.full_name }}" == "${{ github.repository }}" ]] && IS_SAME_REPO="true"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "should_prerelease=$IS_SAME_REPO" >> "$GITHUB_OUTPUT"
+            echo "PR event — build=true release=false prerelease=$IS_SAME_REPO (same-repo=$IS_SAME_REPO)"
+            exit 0
+          fi
+
           if [[ "$EVENT" == "push" ]]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             echo "should_release=$IS_MAIN" >> "$GITHUB_OUTPUT"
+            echo "should_prerelease=false" >> "$GITHUB_OUTPUT"
             echo "Push on $REF — build=true release=$IS_MAIN"
             exit 0
           fi
@@ -118,19 +123,22 @@ jobs:
           if [[ "$EVENT" == "workflow_dispatch" ]]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "should_prerelease=false" >> "$GITHUB_OUTPUT"
             echo "Dispatch — build=true release=true (LLVM $LLVM_TAG)"
             exit 0
           fi
 
-          # schedule: only build+release if LLVM tag changed since last Zig release
-          LATEST_RELEASE=$(gh release list --repo "${{ github.repository }}" --limit 1 \
-            --json tagName --jq '.[0].tagName // ""')
+          # schedule: only build+release if LLVM tag changed since last full Zig release
+          LATEST_RELEASE=$(gh release list --repo "${{ github.repository }}" --limit 20 \
+            --json tagName,isPrerelease \
+            --jq '[.[] | select(.isPrerelease == false)] | .[0].tagName // ""')
           if [[ -n "$LATEST_RELEASE" ]]; then
             PREV_LLVM=$(gh release view "$LATEST_RELEASE" --repo "${{ github.repository }}" \
               --json body --jq '.body' | grep -oP '(?<=LLVM artifact: \`)[^\`]+' || true)
             if [[ "$PREV_LLVM" == "$LLVM_TAG" ]]; then
               echo "should_build=false" >> "$GITHUB_OUTPUT"
               echo "should_release=false" >> "$GITHUB_OUTPUT"
+              echo "should_prerelease=false" >> "$GITHUB_OUTPUT"
               echo "LLVM artifact $LLVM_TAG unchanged since $LATEST_RELEASE — skipping"
               exit 0
             fi
@@ -140,6 +148,7 @@ jobs:
           fi
           echo "should_build=true" >> "$GITHUB_OUTPUT"
           echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "should_prerelease=false" >> "$GITHUB_OUTPUT"
 
       - name: Resolve release tag
         id: tag
@@ -164,13 +173,14 @@ jobs:
     timeout-minutes: 120
 
     env:
-      LLVM_TAG:         ${{ needs.prepare.outputs.llvm_tag }}
-      RELEASE_TAG:      ${{ needs.prepare.outputs.release_tag }}
-      BOOTSTRAP_COMMIT: ${{ needs.prepare.outputs.bootstrap_commit }}
-      ZIG_VERSION:      ${{ needs.prepare.outputs.zig_version }}
-      LLVM_REPO:        emanspeaks/powerzig-bootstrap
-      ZIG_TARGET:       powerpc-linux-musleabihf
-      ZIG_CPU:          baseline
+      LLVM_TAG:          ${{ needs.prepare.outputs.llvm_tag }}
+      RELEASE_TAG:       ${{ needs.prepare.outputs.release_tag }}
+      BOOTSTRAP_COMMIT:  ${{ needs.prepare.outputs.bootstrap_commit }}
+      ZIG_VERSION:       ${{ needs.prepare.outputs.zig_version }}
+      SHOULD_PRERELEASE: ${{ needs.prepare.outputs.should_prerelease }}
+      LLVM_REPO:         emanspeaks/powerzig-bootstrap
+      ZIG_TARGET:        powerpc-linux-musleabihf
+      ZIG_CPU:           baseline
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
@@ -241,17 +251,23 @@ jobs:
             -Dtarget="$ZIG_TARGET" \
             -Dcpu="$ZIG_CPU" \
             -Doptimize=ReleaseFast \
+            -Dflat \
+            -Dstatic-llvm \
+            -Dstrip \
+            -Dversion-string="$ZIG_VERSION" \
             --search-prefix "$CROSS_PREFIX" \
             --search-prefix "$HOST_PREFIX"
 
       - name: Verify output binary
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          ZIG_BIN="out/bin/zig"
+          ZIG_BIN="out/zig"
           [[ ! -f "$ZIG_BIN" ]] && echo "ERROR: $ZIG_BIN not found" && find out -maxdepth 4 | sort && exit 1
           file "$ZIG_BIN"
           file "$ZIG_BIN" | grep -iE 'PowerPC|32.*big' \
             || { echo "ERROR: binary does not appear to be PPC32 big-endian"; exit 1; }
+          echo "=== Stdlib (first 10 entries) ==="
+          ls out/lib/ | head -10
 
       - name: Save build cache
         if: steps.cache.outputs.cache-hit != 'true'
@@ -260,12 +276,23 @@ jobs:
           path: out/
           key: zig-ppc32-${{ env.ZIG_TARGET }}-${{ env.ZIG_CPU }}-${{ needs.prepare.outputs.llvm_tag }}-${{ needs.prepare.outputs.bootstrap_commit }}
 
-      - name: Package
-        if: needs.prepare.outputs.should_release == 'true'
+      - name: Create pre-release (same-repo PR validation)
+        if: needs.prepare.outputs.should_prerelease == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ARCHIVE="zig-$ZIG_TARGET-$RELEASE_TAG.tar.xz"
+          PRE_TAG="pre-$LLVM_TAG-${{ github.run_id }}"
+          ARCHIVE="zig-$ZIG_TARGET-$PRE_TAG.tar.xz"
           tar -cJf "$ARCHIVE" -C out .
           ls -lah "$ARCHIVE"
+          RELEASE_TAG="$PRE_TAG" envsubst < .github/release-notes/zig-template.md > /tmp/release-notes.md
+          gh release create "$PRE_TAG" \
+            --repo "${{ github.repository }}" \
+            --title "Zig $ZIG_VERSION for PowerPC 32-bit (pre-release) $PRE_TAG" \
+            --notes-file /tmp/release-notes.md \
+            --prerelease \
+            "$ARCHIVE"
+          echo "Pre-release created: $PRE_TAG"
 
       - name: Publish release
         if: needs.prepare.outputs.should_release == 'true'
@@ -273,10 +300,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ARCHIVE="zig-$ZIG_TARGET-$RELEASE_TAG.tar.xz"
+          tar -cJf "$ARCHIVE" -C out .
+          ls -lah "$ARCHIVE"
           envsubst < .github/release-notes/zig-template.md > /tmp/release-notes.md
           gh release create "$RELEASE_TAG" \
             --repo "${{ github.repository }}" \
             --title "Zig $ZIG_VERSION for PowerPC 32-bit $RELEASE_TAG" \
             --notes-file /tmp/release-notes.md \
-            --prerelease \
             "$ARCHIVE"
+          echo "Full release created: $RELEASE_TAG"
