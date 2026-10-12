@@ -12,10 +12,6 @@ The build is defined in [zig-build](https://codeberg.org/emanspeaks/zig-build); 
 
 A run only builds when no existing release has the same `zig_key`, so unchanged inputs never produce duplicate releases.
 
-## Releases before the zig-build rework
-
-Releases up to `v7` were built without LLVM and cannot compile code for PowerPC. Use a later release.
-
 ## Running it locally
 
 On a Linux, macOS or BSD machine with a checkout of zig-build, after building the cross LLVM (see powerzig-bootstrap):

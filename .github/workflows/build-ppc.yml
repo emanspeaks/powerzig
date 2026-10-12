@@ -177,9 +177,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
         run: |
-          LATEST=$(gh release list -R "$GITHUB_REPOSITORY" -L 100 --json tagName \
-            -q '[.[].tagName | select(test("^v[0-9]+$")) | ltrimstr("v") | tonumber] | max // 0')
-          TAG="v$((LATEST + 1))"
+          # count tags too: deleting a release leaves its tag, which must not be reused
+          LATEST=$( { gh release list -R "$GITHUB_REPOSITORY" -L 100 --json tagName -q '.[].tagName'
+                      gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --paginate -q '.[].ref | ltrimstr("refs/tags/")'
+                    } | grep -E '^v[0-9]+$' | sed 's/^v//' | sort -n | tail -1)
+          TAG="v$(( ${LATEST:-0} + 1 ))"
           jq -r '"Zig `\(.zig_version)` for `\(.target)` (`\(.cpu)`), cross-compiled by " +
             "[zig-build `\(.zig_build_commit[0:12])`](https://codeberg.org/emanspeaks/zig-build/src/commit/\(.zig_build_commit)) " +
             "and smoke-tested under qemu (runs, and builds + runs zig and C hello worlds).\n\n" +
