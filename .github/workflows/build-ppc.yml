@@ -60,11 +60,17 @@ jobs:
         id: keys
         working-directory: zig-build
         run: |
+          # plain assignments so a missing/failing script fails the step
+          COMMIT=$(git rev-parse HEAD)
+          HOST_KEY=$(bash ./cross-manifest.sh key host)
+          LLVM_KEY=$(bash ./cross-manifest.sh key llvm "$TARGET" "$CPU")
+          ZIG_KEY=$(bash ./cross-manifest.sh key zig "$TARGET" "$CPU")
+          [ -n "$HOST_KEY" ] && [ -n "$LLVM_KEY" ] && [ -n "$ZIG_KEY" ] || { echo "::error::empty key"; exit 1; }
           {
-            echo "zig_build_commit=$(git rev-parse HEAD)"
-            echo "host_key=$(bash ./cross-manifest.sh key host)"
-            echo "llvm_key=$(bash ./cross-manifest.sh key llvm "$TARGET" "$CPU")"
-            echo "zig_key=$(bash ./cross-manifest.sh key zig "$TARGET" "$CPU")"
+            echo "zig_build_commit=$COMMIT"
+            echo "host_key=$HOST_KEY"
+            echo "llvm_key=$LLVM_KEY"
+            echo "zig_key=$ZIG_KEY"
           } | tee -a "$GITHUB_OUTPUT"
 
       - name: Find matching LLVM release; skip if this zig_key is already released
@@ -80,7 +86,8 @@ jobs:
             for tag in $(gh release list -R "$1" -L 30 --json tagName -q '.[].tagName'); do
               key=$(gh release download "$tag" -R "$1" -p manifest.json -O - 2>/dev/null \
                 | jq -r --arg f "$2" '.[$f] // empty' || true)
-              if [ "$key" = "$3" ]; then echo "$tag"; return; fi
+              # releases from before the zig-build rework have no manifest (empty key)
+              if [ -n "$key" ] && [ "$key" = "$3" ]; then echo "$tag"; return; fi
             done
           }
           DONE=$(find_release "$GITHUB_REPOSITORY" zig_key "$ZIG_KEY")
