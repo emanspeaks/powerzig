@@ -23,7 +23,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '0 12 * * *'   # daily; cheap when nothing changed
+    - cron: '0 8 * * *'   # Daily 08:00 UTC
 
 permissions:
   contents: write

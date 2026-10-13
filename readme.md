@@ -12,6 +12,10 @@ The build is defined in [zig-build](https://codeberg.org/emanspeaks/zig-build); 
 
 A run only builds when no existing release has the same `zig_key`, so unchanged inputs never produce duplicate releases.
 
+## Mac OS X on PowerPC
+
+Not supported, and not currently possible: LLVM's PowerPC backend can only write ELF and XCOFF objects (its Mach-O support was removed upstream), Zig has no self-hosted PowerPC backend, and Zig's standard library does not support `powerpc-macos`. To use Zig on a PowerPC Mac, run Linux on it and use the Linux build above.
+
 ## Running it locally
 
 On a Linux, macOS or BSD machine with a checkout of zig-build, after building the cross LLVM (see powerzig-bootstrap):
