@@ -54,7 +54,7 @@ jobs:
       llvm_tag: ${{ steps.check.outputs.llvm_tag }}
       should_build: ${{ steps.check.outputs.should_build }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check out zig-build
         run: bash .github/scripts/clone-zig-build.sh "${{ inputs.zig_build_ref || 'main' }}"
@@ -115,14 +115,14 @@ jobs:
     env:
       LLVM_TAG: ${{ needs.prepare.outputs.llvm_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
         with:
           zig_build_commit: ${{ needs.prepare.outputs.zig_build_commit }}
 
       - name: Restore stage3
         id: cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: zig-build/bin/stage3
           key: stage3-${{ needs.prepare.outputs.host_key }}
@@ -134,7 +134,7 @@ jobs:
 
       - name: Save stage3
         if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: zig-build/bin/stage3
           key: stage3-${{ needs.prepare.outputs.host_key }}
