@@ -22,5 +22,5 @@ On a Linux, macOS or BSD machine with a checkout of zig-build, after building th
 
 ```sh
 ./build-zig-cross.sh powerpc-linux-musleabihf baseline
-./test-zig-cross.sh powerpc-linux-musleabihf baseline   # needs qemu-user-static
+./test-zig-cross.sh powerpc-linux-musleabihf baseline   # needs qemu-user (+ qemu-user-binfmt)
 ```
